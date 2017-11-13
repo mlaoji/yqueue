@@ -26,8 +26,9 @@ var (
 	*/
 
 	//redis配置
-	DefaultQueueType   = "redis"
-	DefaultQueueConfig = map[string]string{
+	DefaultQueueType    = "redis"
+	DefaultQueueLogpath = "/data/logs/queue"
+	DefaultQueueConfig  = map[string]string{
 		"host":     "127.0.0.1:6379",
 		"password": "test",
 	}
@@ -66,6 +67,8 @@ func NewYQueue(options ...interface{}) *YQueue { //{{{//参数 queuetype, config
 			}
 		}
 	}
+
+	lib.DefaultQueueLogpath = DefaultQueueLogpath
 
 	return &YQueue{queueType: qtype, queueConfig: qconf}
 } // }}}
@@ -156,7 +159,7 @@ func (this *YQueue) stopJob(op_jobs ...string) { // {{{
 			continue
 		}
 
-		killed := this.stopProcess(ylib.Toint(pid))
+		killed := this.stopProcess(ylib.ToInt(pid))
 		fmt.Print("send signal to process, pid:" + pid)
 		if killed {
 			fmt.Println("success")
@@ -176,7 +179,7 @@ func (this *YQueue) stopJob(op_jobs ...string) { // {{{
 				continue
 			}
 
-			if this.isAliveProcess(ylib.Toint(pid)) {
+			if this.isAliveProcess(ylib.ToInt(pid)) {
 				done = false
 			} else {
 				delete(workers, job)
@@ -202,7 +205,7 @@ func (this *YQueue) isAliveProcess(pid int) bool { // {{{
 } // }}}
 
 func (this *YQueue) isStoppingJob() bool { // {{{
-	rs, err := exec.Command("sh", "-c", "ps -ef|grep '_yqueue_' | grep ' restart \\| stop ' | grep -v grep |  grep -v "+ylib.Tostring(syscall.Getpid())).Output()
+	rs, err := exec.Command("sh", "-c", "ps -ef|grep '_yqueue_' | grep ' restart \\| stop ' | grep -v grep |  grep -v "+ylib.ToString(syscall.Getpid())).Output()
 	if nil == err && len(rs) > 0 {
 		list := strings.Split(string(rs), "\n")
 		return len(list) > 0
@@ -306,7 +309,7 @@ func (this *YQueue) startJob(op_job string, is_restart bool) { // {{{
 			job_instance.StartWorker(worker)
 		} else {
 			fmt.Println("job:" + job + " is starting...")
-			cmd := "nohup " + this.Handler + " " + CMD_START + " " + job + " _" + ylib.Tostring(syscall.Getpid()) + "_ _yqueue_ >> /dev/null 2>&1 &"
+			cmd := "nohup " + this.Handler + " " + CMD_START + " " + job + " _" + ylib.ToString(syscall.Getpid()) + "_ _yqueue_ >> /dev/null 2>&1 &"
 			rs, err := exec.Command("sh", "-c", cmd).Output()
 			if nil != err {
 				fmt.Println("Error:")

@@ -25,7 +25,7 @@ type Job struct {
 
 var (
 	hookableSignals      []os.Signal
-	DefaultQueueLogpath  = "/storage/logs/queue"
+	DefaultQueueLogpath  = ""
 	DefaultQueueLoglevel = 0
 )
 
@@ -247,6 +247,10 @@ func (this *Job) logRunError(data ...interface{}) { // {{{
 
 func (this *Job) logJob(data ...interface{}) { // {{{
 	this.loggerJob.Access(data...)
+
+	if this.debug {
+		fmt.Printf("%v", data)
+	}
 } // }}}
 
 func (this *Job) logJobError(data ...interface{}) { // {{{
