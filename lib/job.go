@@ -38,6 +38,8 @@ func NewJob(job_name, queue_type string, queue_config []map[string]string) (*Job
 	if nil == yqueue_job_instance[key] {
 		mutex.RUnlock()
 		mutex.Lock()
+		defer mutex.Unlock()
+
 		if nil == yqueue_job_instance[key] {
 			var err error
 			yqueue_job_instance[key], err = newJob(job_name, queue_type, queue_config)
@@ -45,7 +47,6 @@ func NewJob(job_name, queue_type string, queue_config []map[string]string) (*Job
 				return nil, err
 			}
 		}
-		mutex.Unlock()
 	} else {
 		mutex.RUnlock()
 	}
