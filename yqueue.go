@@ -154,7 +154,8 @@ func (this *YQueue) stopJob(op_jobs ...string) { // {{{
 		return
 	}
 
-	for job, pid := range workers {
+	stop_workers := map[string]string{}
+	for pid, job := range workers {
 		if "" != op_job && job != op_job {
 			continue
 		}
@@ -163,18 +164,18 @@ func (this *YQueue) stopJob(op_jobs ...string) { // {{{
 		fmt.Print("send signal to process, pid:" + pid)
 		if killed {
 			fmt.Println("success")
+			fmt.Println("job:" + job + " pid:" + pid + " is stopping...")
+			stop_workers[pid] = job
 		} else {
 			fmt.Println("failed")
 		}
-
-		fmt.Println("job:" + job + " pid:" + pid + " is stopping...")
 	}
 
 	done := false
 	for !done {
 		done = true
 
-		for job, pid := range workers {
+		for pid, job := range stop_workers {
 			if "" != op_job && job != op_job {
 				continue
 			}
@@ -182,8 +183,8 @@ func (this *YQueue) stopJob(op_jobs ...string) { // {{{
 			if this.isAliveProcess(ylib.ToInt(pid)) {
 				done = false
 			} else {
-				delete(workers, job)
-				fmt.Println("job:" + job + " is stopped!")
+				delete(workers, pid)
+				fmt.Println("job:" + job + " pid:" + pid + " is stopped!")
 			}
 		}
 
@@ -245,7 +246,7 @@ func (this *YQueue) getMainWorkers(op_job string) map[string]string { // {{{
 		for _, line := range lines {
 			if "" != line {
 				pid_ppid := strings.Split(line, " ")
-				pids[pid_ppid[1]] = pid_ppid[0]
+				pids[pid_ppid[0]] = pid_ppid[1]
 			}
 		}
 	}
@@ -276,6 +277,7 @@ func (this *YQueue) startJob(op_job string, is_restart bool) { // {{{
 		live_workers = this.getMainWorkers(op_job)
 	}
 
+FIRST:
 	for job, worker := range this.Worker {
 		if "" != op_job && job != op_job {
 			continue
@@ -287,9 +289,13 @@ func (this *YQueue) startJob(op_job string, is_restart bool) { // {{{
 				continue
 			}
 
-			if !is_restart && len(live_workers[job]) > 0 {
-				fmt.Println("job:" + job + " is already running!")
-				continue
+			if !is_restart {
+				for _, j := range live_workers {
+					if j == job {
+						fmt.Println("job:" + job + " is already running!")
+						continue FIRST
+					}
+				}
 			}
 		}
 
