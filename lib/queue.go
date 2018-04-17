@@ -161,5 +161,5 @@ func (this RedisQueue) getTraceId() string { //{{{
 } //}}}
 
 func (this RedisQueue) getKey(job string) string { //{{{
-	return fmt.Sprint("q:", job)
+	return fmt.Sprint("queue:", job)
 } //}}}
