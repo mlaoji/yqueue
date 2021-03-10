@@ -12,9 +12,12 @@ func main() {
 	}
 
 	conf1 := map[string]string{
-		"host":     "127.0.0.1:6378",
+		"host":     "127.0.0.1:6379",
 		"password": "test",
 	}
+
+	yqueue.DefaultQueueLogpath = "/tmp/log/queue"
+
 	queue := yqueue.NewYQueue("redis", conf, conf1)
 	fmt.Printf("%#v", queue)
 	for i := 0; i < 10000; i++ {

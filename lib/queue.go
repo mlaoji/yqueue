@@ -146,10 +146,13 @@ func (this RedisQueue) ConsumeQueue(job, receipt_handle string) error { // {{{
 } // }}}
 
 func (this RedisQueue) getRedis() (*ylib.RedisClient, error) { //{{{
-	rand.Seed(int64(time.Now().Nanosecond()))
-	key := rand.Intn(len(this.config))
-
+	key := this.getRand(len(this.config))
 	return ylib.NewRedisClient(this.config[key])
+} //}}}
+
+func (this RedisQueue) getRand(len int) int { //{{{
+	rand.Seed(int64(time.Now().Nanosecond()))
+	return rand.Intn(len)
 } //}}}
 
 func (this RedisQueue) getTraceId() string { //{{{
@@ -157,7 +160,8 @@ func (this RedisQueue) getTraceId() string { //{{{
 	if nil != err {
 		h = ylib.GetLocalIp()
 	}
-	return fmt.Sprintf("%d%d", ylib.Crc32(h)&0x7FFFFFF|0x8000000, time.Now().Nanosecond()&0x7FFFFFF|0x8000000)
+
+	return fmt.Sprintf("%d%d%d", ylib.Crc32(h)&0x7FFFFFF|0x8000000, time.Now().Nanosecond()&0x7FFFFFF|0x8000000, this.getRand(1000000000))
 } //}}}
 
 func (this RedisQueue) getKey(job string) string { //{{{

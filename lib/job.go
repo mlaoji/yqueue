@@ -26,7 +26,7 @@ type Job struct {
 var (
 	hookableSignals      []os.Signal
 	DefaultQueueLogpath  = ""
-	DefaultQueueLoglevel = 0
+	DefaultQueueLoglevel = 7
 )
 
 var yqueue_job_instance = map[string]*Job{}
