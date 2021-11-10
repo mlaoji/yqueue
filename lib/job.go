@@ -3,6 +3,7 @@ package lib
 import (
 	"fmt"
 	ylib "github.com/mlaoji/ygo/lib"
+	"github.com/mlaoji/yqueue/lib/queueclient"
 	"os"
 	"os/signal"
 	"reflect"
@@ -13,14 +14,20 @@ import (
 )
 
 type Job struct {
-	Job        string
-	queue      IQueue
+	JobName    string
+	consumers  map[int]int
+	queue      queueclient.QueueClient
 	debug      bool
 	sigChan    chan os.Signal
 	stop       bool
 	loggerRun  *ylib.FileLogger
 	loggerJob  *ylib.FileLogger
 	loggerTask *ylib.FileLogger
+}
+
+type Worker struct {
+	Handler interface{}
+	Options *queueclient.MessageOption
 }
 
 var (
@@ -67,7 +74,7 @@ func newJob(job_name, queue_type string, queue_config []map[string]string) (*Job
 	}
 
 	job := &Job{
-		Job:        job_name,
+		JobName:    job_name,
 		sigChan:    make(chan os.Signal),
 		loggerRun:  logger_run,
 		loggerJob:  ylib.NewLogger(DefaultQueueLogpath+"/job", "job-"+job_name, DefaultQueueLoglevel),
@@ -75,20 +82,22 @@ func newJob(job_name, queue_type string, queue_config []map[string]string) (*Job
 		queue:      queue,
 	}
 
-	fmt.Println("job init")
+	fmt.Println("job init:", "name =>", job_name, "type =>", queue_type)
+
 	return job, nil
 } // }}}
 
-func (this *Job) AddTask(params map[string]interface{}) (string, error) { // {{{
+func (this *Job) AddTask(params map[string]interface{}, options *queueclient.MessageOption) (string, error) { // {{{
 	start_time := time.Now()
-	traceid, err := this.queue.AddQueue(this.Job, params)
+
+	traceid, err := this.queue.SendMessage(this.JobName, params, options)
 	consume := time.Now().Sub(start_time).Nanoseconds() / 1000 / 1000
 	if nil != err {
-		this.logTaskError(map[string]interface{}{"consume": consume, "params": params, "error": err})
+		this.logTaskError(map[string]interface{}{"consume": consume, "params": params, "options": options, "error": err})
 		return "", err
 	}
 
-	this.logTask(map[string]interface{}{"consume": consume, "params": params, "traceid": traceid})
+	this.logTask(map[string]interface{}{"consume": consume, "params": params, "options": options, "traceid": traceid})
 
 	return traceid, nil
 } // }}}
@@ -108,6 +117,7 @@ func (this *Job) handleSignals() { // {{{
 	pid := syscall.Getpid()
 	for {
 		sig = <-this.sigChan
+
 		switch sig {
 		case syscall.SIGTERM, syscall.SIGINT:
 			this.logRun("killed:", pid)
@@ -118,61 +128,100 @@ func (this *Job) handleSignals() { // {{{
 	}
 } // }}}
 
-func (this *Job) StartWorker(worker map[string]interface{}) { // {{{
+func (this *Job) StartWorker(worker *Worker) { // {{{
 	var wg sync.WaitGroup
-
-	if this.debug {
-		fmt.Println("start in debug model")
-
-		ch := make(chan int)
-		this.runWorker(worker, ch, &wg)
-		ch <- 1
-		wg.Wait()
-
-		fmt.Println("Exit")
-		return
-	}
 
 	defer this.getLastError()
 
 	go this.handleSignals()
+	go this.runPendingWorker(&wg)
+	go this.runDelayWorker(&wg)
+
+	/*
+		if this.debug {
+			fmt.Println("start in debug model")
+
+			this.runWorker(worker, 0, nil, &wg)
+
+			wg.Wait()
+
+			fmt.Println("Exit")
+			return
+		}
+	*/
 
 	pid := syscall.Getpid()
 	this.logRun("start main process, pid:", pid)
 
-	//计算缓冲区大小，阻塞最后一个worker，所以需要-1
-	total_chan := worker["max_children"].(int) - 1
-	if total_chan < 0 {
-		total_chan = 0
+	total_consumers := worker.Options.Children
+	if total_consumers < 1 {
+		total_consumers = 1
 	}
 
-	ch := make(chan int, total_chan)
-	i := 0
-	for {
-		if i > total_chan {
-			i = 0
-		}
-		i++
+	consumer_limit := this.queue.GetConsumerLimit(this.JobName)
+	if total_consumers < consumer_limit {
+		total_consumers = consumer_limit
+	}
 
+	//计算缓冲区大小，阻塞最后一个worker，所以需要-1
+	ch := make(chan int, total_consumers-1)
+
+	go func() {
+		for i := 0; i < total_consumers; i++ {
+			ch <- i
+		}
+	}()
+
+	for {
 		if this.stop {
 			this.logRun("worker stoped!")
 			close(ch)
 			break
 		}
 
-		this.logRun("start child:", i)
-		go this.runWorker(worker, ch, &wg)
-		ch <- i
+		select {
+		case consumer_id, ok := <-ch:
+			if ok {
+				this.logRun("start child:", consumer_id)
+				go this.runWorker(worker, consumer_id, ch, &wg)
+			}
+		default:
+			time.Sleep(3e9)
 
-		time.Sleep(3e9)
+		}
 	}
 
 	wg.Wait()
 
-	fmt.Println("Exit")
+	this.println("Exit")
 } // }}}
 
-func (this *Job) runWorker(worker map[string]interface{}, ch chan int, wg *sync.WaitGroup) { //{{{
+func (this *Job) runWorker(worker *Worker, consumer_id int, ch chan int, wg *sync.WaitGroup) { //{{{
+	defer func() {
+		this.getLastError()
+
+		wg.Done()
+
+		this.logRun("worker done child:", consumer_id)
+
+		if nil != ch && !this.stop {
+			ch <- consumer_id
+		}
+	}()
+
+	wg.Add(1)
+
+	for {
+		if this.stop {
+			this.logRun("stop child:", consumer_id)
+			return
+		}
+
+		this.execTask(worker, consumer_id)
+	}
+} //}}}
+
+func (this *Job) runPendingWorker(wg *sync.WaitGroup) { //{{{
 	defer func() {
 		this.getLastError()
 
@@ -181,35 +230,81 @@ func (this *Job) runWorker(worker map[string]interface{}, ch chan int, wg *sync.
 
 	wg.Add(1)
 
+	this.println("start pending worker!")
+
 	for {
 		if this.stop {
-			this.logRun("stop child:", <-ch)
+			this.logRun("pending worker stoped!")
 			return
 		}
 
-		this.execTask(worker)
-	}
+		t, err := this.queue.RescuePendingQueue(this.JobName)
 
-	this.logRun("worker done child:", <-ch)
+		if t > 0 {
+			this.logRun("RescuePendingQueue total:", t)
+		}
+
+		if nil != err {
+			this.logRunError("RescuePendingQueue error:", err)
+		}
+
+		time.Sleep(3e9)
+	}
 } //}}}
 
-func (this *Job) execTask(worker map[string]interface{}) { //{{{
-	params, traceid, receipt_handle, err := this.queue.GetQueue(this.Job)
+func (this *Job) runDelayWorker(wg *sync.WaitGroup) { //{{{
+	defer func() {
+		this.getLastError()
+
+		wg.Done()
+	}()
+
+	wg.Add(1)
+
+	this.println("start delay worker!")
+
+	for {
+		if this.stop {
+			this.logRun("delay worker stoped!")
+			return
+		}
+
+		t, err := this.queue.RescueDelayQueue(this.JobName)
+		if t > 0 {
+			this.logRun("RescueDelayQueue total:", t)
+		}
+
+		if nil != err {
+			this.logRunError("RescueDelayQueue error:", err)
+		}
+
+		time.Sleep(3e9)
+	}
+} //}}}
+
+func (this *Job) execTask(worker *Worker, consumer_id int) { //{{{
+	params, traceid, receipt_handle, err := this.queue.ReceiveMessage(this.JobName, consumer_id, worker.Options)
 	if nil != err {
-		this.logRunError("get queue error:", err)
+		this.logRunError("ReceiveMessage error:", err)
 		return
 	}
+
+	this.println("ReceiveMessage:", params)
 
 	if nil == params {
-		time.Sleep(3e9)
-		fmt.Println("wait...")
+		if queueclient.DefaultBlockTime == 0 {
+			time.Sleep(3e9) // redis使用brpoplpush堵塞
+		}
 		return
 	}
 
-	defer this.getLastError()
+	//是否成功消费
+	success := []bool{false}
+
+	defer this.getLastError(traceid, params, receipt_handle, worker.Options, success)
 
 	start_time := time.Now()
-	worker_type := worker["worker"]
+	worker_type := worker.Handler
 
 	var workerType reflect.Type
 	reflectVal := reflect.ValueOf(worker_type)
@@ -220,42 +315,59 @@ func (this *Job) execTask(worker map[string]interface{}) { //{{{
 	in[0] = reflect.ValueOf(params)
 	method := vc.MethodByName("Execute")
 	res := method.Call(in)
-	var data interface{}
-	if len(res) > 0 {
-		data = res[0].Interface()
-		if len(res) > 1 && !res[1].IsNil() {
-			err = res[1].Interface().(error)
-		}
-	}
 
 	consume := time.Now().Sub(start_time).Nanoseconds() / 1000 / 1000
 
-	this.queue.ConsumeQueue(this.Job, receipt_handle)
+	if len(res) > 0 && !res[0].IsNil() {
+		switch val := res[0].Interface().(type) {
+		case bool:
+			if !val {
+				err = fmt.Errorf("worker function return false") //worker脚本返回false,消费失败
+				this.logJobWarn(map[string]interface{}{"traceid": traceid, "consume": consume, "params": params, "err": err})
+				return
+			}
+		case error: //worker脚本返回error,消费失败
+			this.logJobWarn(map[string]interface{}{"traceid": traceid, "consume": consume, "params": params, "err": val})
+			return
+		default:
+		}
+	}
+
+	//消费成功
+	success[0] = true
 
 	consume_t := time.Now().Sub(start_time).Nanoseconds() / 1000 / 1000
-	this.logJob(map[string]interface{}{"traceid": traceid, "consume": consume, "consume_t": consume_t, "params": params, "data": data, "err": err})
+	this.logJob(map[string]interface{}{"traceid": traceid, "consume": consume, "consume_t": consume_t, "params": params})
+
+	//向queue发送ack完成消费
+	this.queue.DeleteMessage(this.JobName, receipt_handle)
+
+	this.println("DeleteMessage:", this.JobName, receipt_handle)
 } //}}}
 
 func (this *Job) logRun(data ...interface{}) { // {{{
 	this.loggerRun.Access(data...)
-	fmt.Printf("%v", data)
+	this.println("logRun:", data)
 } // }}}
 
 func (this *Job) logRunError(data ...interface{}) { // {{{
 	this.loggerRun.Error(data...)
-	fmt.Printf("%v", data)
+	this.println("logRunError:", data)
 } // }}}
 
 func (this *Job) logJob(data ...interface{}) { // {{{
 	this.loggerJob.Access(data...)
-
-	if this.debug {
-		fmt.Printf("%v", data)
-	}
+	this.println("logJob:", data)
 } // }}}
 
 func (this *Job) logJobError(data ...interface{}) { // {{{
 	this.loggerJob.Error(data...)
+	this.println("logJobError:", data)
+} // }}}
+
+func (this *Job) logJobWarn(data ...interface{}) { // {{{
+	this.loggerJob.Warn(data...)
+	this.println("logJobWarn:", data)
 } // }}}
 
 func (this *Job) logTask(data ...interface{}) { // {{{
@@ -266,7 +378,34 @@ func (this *Job) logTaskError(data ...interface{}) { // {{{
 	this.loggerTask.Error(data...)
 } // }}}
 
-func (this *Job) getLastError() { // {{{
+func (this *Job) println(data ...interface{}) { // {{{
+	if this.debug {
+		fmt.Println("time:"+ylib.DateTime(), data)
+	}
+} // }}}
+
+func (this *Job) getLastError(data ...interface{}) { // {{{
+	var traceid interface{}
+	var params interface{}
+	var receipt_handle interface{}
+	var options *queueclient.MessageOption
+
+	if len(data) > 0 {
+		traceid = data[0]
+	}
+
+	if len(data) > 1 {
+		params = data[1]
+	}
+
+	if len(data) > 2 {
+		receipt_handle = data[2]
+	}
+
+	if len(data) > 3 {
+		options = data[3].(*queueclient.MessageOption)
+	}
+
 	if err := recover(); err != nil {
 		var errmsg string
 		switch errinfo := err.(type) {
@@ -276,11 +415,26 @@ func (this *Job) getLastError() { // {{{
 			errmsg = fmt.Sprint(errinfo)
 		}
 
+		if traceid != nil {
+			this.logJobError(map[string]interface{}{"traceid": traceid, "params": params, "options": options, "receipt_handle": receipt_handle, "err": errmsg})
+		}
+
 		debug_trace := debug.Stack()
 
 		this.logRunError("catch error:", errmsg)
 		this.logRunError("debug trace:", string(debug_trace))
+	}
 
-		os.Stderr.Write(debug_trace)
+	if len(data) > 4 {
+		success := data[4].([]bool)
+		if !success[0] {
+			err := this.queue.RetryQueue(this.JobName, receipt_handle, options)
+			if nil != err {
+				this.logRunError("RetryQueue error:", map[string]interface{}{"receipt_handle": receipt_handle, "options": fmt.Sprintf("%#v", options)}, err)
+				return
+			}
+
+			this.logRun("RetryQueue:", map[string]interface{}{"receipt_handle": receipt_handle, "options": fmt.Sprintf("%#v", options)})
+		}
 	}
 } // }}}

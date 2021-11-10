@@ -1,4 +1,4 @@
-package alimns
+package queueclient
 
 import (
 	"bytes"
@@ -7,8 +7,8 @@ import (
 	"crypto/sha1"
 	"encoding/base64"
 	"encoding/xml"
-	"errors"
 	"fmt"
+	ylib "github.com/mlaoji/ygo/lib"
 	"net"
 	"net/http"
 	"sort"
@@ -70,21 +70,25 @@ func (b *base64Bytes) UnmarshalXML(d *xml.Decoder, start xml.StartElement) (err 
 	return nil
 } // }}}
 
-func NewAliMnsClient(appid, secret, url string) *AliMnsClient {
+func NewAlimnsClient(queue_config map[string]string) AlimnsClient {
 	timeout := DefaultTimeout
-	return &AliMnsClient{appid: appid, secret: secret, url: url, timeout: timeout}
+	if len(queue_config["timeout"]) > 0 {
+		timeout = ylib.AsInt(queue_config["timeout"])
+	}
+
+	return AlimnsClient{appid: queue_config["alimns_id"], secret: queue_config["alimns_secret"], url: queue_config["alimns_url"], timeout: timeout}
 }
 
 var DefaultTimeout int = 5
 
-type AliMnsClient struct {
+type AlimnsClient struct {
 	appid   string
 	secret  string
 	url     string
 	timeout int
 }
 
-func (this *AliMnsClient) request(method string, path string, data []byte) (resp *http.Response, err error) { // {{{
+func (this AlimnsClient) request(method string, path string, data []byte) (resp *http.Response, err error) { // {{{
 	var req *http.Request
 
 	if req, err = http.NewRequest(method, this.url+path, bytes.NewBuffer(data)); err != nil {
@@ -129,7 +133,7 @@ func (this *AliMnsClient) request(method string, path string, data []byte) (resp
 	return client.Do(req)
 } // }}}
 
-func (this *AliMnsClient) respHandler(method string, path string, data []byte, v interface{}) (err error) { // {{{
+func (this AlimnsClient) respHandler(method string, path string, data []byte, v interface{}) (err error) { // {{{
 	resp, err := this.request(method, path, data)
 	if err != nil {
 		return err
@@ -140,7 +144,7 @@ func (this *AliMnsClient) respHandler(method string, path string, data []byte, v
 		decoder := xml.NewDecoder(resp.Body)
 		e := ErrorResponse{}
 		decoder.Decode(&e)
-		return errors.New(e.Message)
+		return fmt.Errorf(e.Message)
 	}
 
 	if v != nil {
@@ -196,35 +200,65 @@ func signature(key string, method string, headers map[string]string, resource st
 	return
 } // }}}
 
-func (this *AliMnsClient) SendMessage(queueName, content string, options ...int64) (MessageResponse, error) { // {{{
-	var delaySeconds int64 = 0
-	var priority int64 = 8
-	if l := len(options); l > 0 {
-		delaySeconds = options[0]
-		if l > 1 {
-			priority = options[1]
-		}
+func (this AlimnsClient) SendMessage(queue_name string, params map[string]interface{}, options *MessageOption) (traceid string, err error) { // {{{
+	delay_seconds := int64(options.Delay)
+	priority := int64(8)
+
+	msg := Message{MessageBody: []byte(ylib.JsonEncode(params)), DelaySeconds: delay_seconds, Priority: priority}
+	msg_xml_bytes, _ := xml.Marshal(&msg)
+	path := fmt.Sprintf("/queues/%s/messages", queue_name)
+	m := MessageResponse{}
+	err = this.respHandler("POST", path, msg_xml_bytes, &m)
+	if nil != err {
+		return "", err
 	}
 
-	msg := Message{MessageBody: []byte(content), DelaySeconds: delaySeconds, Priority: priority}
-	msgXmlBytes, _ := xml.Marshal(&msg)
-	path := fmt.Sprintf("/queues/%s/messages", queueName)
-	m := MessageResponse{}
-	return m, this.respHandler("POST", path, msgXmlBytes, &m)
+	return m.MessageId, nil
 } // }}}
 
-func (this *AliMnsClient) ReceiveMessage(queueName string, waitSec int64) (MessageReceive, error) { // {{{
+func (this AlimnsClient) ReceiveMessage(queue_name string, _ int, options *MessageOption) (data map[string]interface{}, traceid string, receipt_handle interface{}, err error) { // {{{
 	path := ""
-	if waitSec < 0 {
-		path = fmt.Sprintf("/queues/%s/messages", queueName)
+	if DefaultBlockTime > 0 {
+		path = fmt.Sprintf("/queues/%s/messages?waitseconds=%v", queue_name, DefaultBlockTime)
 	} else {
-		path = fmt.Sprintf("/queues/%s/messages?waitseconds=%v", queueName, waitSec)
+		path = fmt.Sprintf("/queues/%s/messages", queue_name)
 	}
 	msg := MessageReceive{}
-	return msg, this.respHandler("GET", path, nil, &msg)
+	err = this.respHandler("GET", path, nil, &msg)
+	if nil != err {
+		return nil, "", nil, err
+	}
+
+	body_str := string(msg.MessageBody)
+	if "" != body_str {
+		data, ok := ylib.JsonDecode(body_str).(map[string]interface{})
+		if !ok {
+			err = fmt.Errorf("response data is not map[string]interface{}")
+			return nil, "", nil, err
+		}
+		return data, msg.MessageId, msg.ReceiptHandle, nil
+	}
+
+	return nil, "", nil, nil
 } // }}}
 
-func (this *AliMnsClient) DeleteMessage(queueName, receiptHandle string) error { // {{{
-	path := fmt.Sprintf("/queues/%s/messages?ReceiptHandle=%s", queueName, receiptHandle)
+func (this AlimnsClient) DeleteMessage(queue_name string, receipt_handle interface{}) error { // {{{
+	path := fmt.Sprintf("/queues/%s/messages?ReceiptHandle=%s", queue_name, receipt_handle)
 	return this.respHandler("DELETE", path, nil, nil)
+} // }}}
+
+func (this AlimnsClient) RescuePendingQueue(string) (int, error) { // {{{
+	return 0, nil
+} // }}}
+
+func (this AlimnsClient) RescueDelayQueue(string) (int, error) { // {{{
+	return 0, nil
+} // }}}
+
+func (this AlimnsClient) GetConsumerLimit(string) int { // {{{
+	return 0
+} // }}}
+
+func (this AlimnsClient) RetryQueue(string, interface{}, *MessageOption) error { // {{{
+	return nil
 } // }}}
