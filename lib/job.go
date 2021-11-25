@@ -134,9 +134,6 @@ func (this *Job) StartWorker(worker *Worker) { // {{{
 	defer this.getLastError()
 
 	go this.handleSignals()
-	go this.runPendingWorker(&wg)
-	go this.runDelayWorker(&wg)
-
 	/*
 		if this.debug {
 			fmt.Println("start in debug model")
@@ -165,11 +162,15 @@ func (this *Job) StartWorker(worker *Worker) { // {{{
 
 	//计算缓冲区大小，阻塞最后一个worker，所以需要-1
 	ch := make(chan int, total_consumers-1)
+	ch_pend := make(chan int)
+	ch_delay := make(chan int)
 
 	go func() {
 		for i := 0; i < total_consumers; i++ {
 			ch <- i
 		}
+		ch_pend <- 0
+		ch_delay <- 0
 	}()
 
 	for {
@@ -185,9 +186,16 @@ func (this *Job) StartWorker(worker *Worker) { // {{{
 				this.logRun("start child:", consumer_id)
 				go this.runWorker(worker, consumer_id, ch, &wg)
 			}
-		default:
-			time.Sleep(3e9)
 
+		case <-ch_pend:
+			this.logRun("start pending worker")
+			go this.runPendingWorker(ch_pend, &wg)
+
+		case <-ch_delay:
+			this.logRun("start delay worker")
+			go this.runDelayWorker(ch_delay, &wg)
+
+		case <-time.After(3e9):
 		}
 	}
 
@@ -198,16 +206,19 @@ func (this *Job) StartWorker(worker *Worker) { // {{{
 
 func (this *Job) runWorker(worker *Worker, consumer_id int, ch chan int, wg *sync.WaitGroup) { //{{{
 	defer func() {
-		this.getLastError()
-
 		wg.Done()
 
 		this.logRun("worker done child:", consumer_id)
 
 		if nil != ch && !this.stop {
+			//异常退出，3秒后重启
+			time.Sleep(3e9)
+
 			ch <- consumer_id
 		}
 	}()
+
+	defer this.getLastError()
 
 	wg.Add(1)
 
@@ -221,16 +232,23 @@ func (this *Job) runWorker(worker *Worker, consumer_id int, ch chan int, wg *syn
 	}
 } //}}}
 
-func (this *Job) runPendingWorker(wg *sync.WaitGroup) { //{{{
+func (this *Job) runPendingWorker(ch chan int, wg *sync.WaitGroup) { //{{{
 	defer func() {
-		this.getLastError()
-
 		wg.Done()
+
+		this.logRun("pending worker done")
+
+		if nil != ch && !this.stop {
+			//异常退出，3秒后重启
+			time.Sleep(3e9)
+
+			ch <- 0
+		}
 	}()
 
-	wg.Add(1)
+	defer this.getLastError()
 
-	this.println("start pending worker!")
+	wg.Add(1)
 
 	for {
 		if this.stop {
@@ -252,16 +270,23 @@ func (this *Job) runPendingWorker(wg *sync.WaitGroup) { //{{{
 	}
 } //}}}
 
-func (this *Job) runDelayWorker(wg *sync.WaitGroup) { //{{{
+func (this *Job) runDelayWorker(ch chan int, wg *sync.WaitGroup) { //{{{
 	defer func() {
-		this.getLastError()
-
 		wg.Done()
+
+		this.logRun("delay worker done")
+
+		if nil != ch && !this.stop {
+			//异常退出，3秒后重启
+			time.Sleep(3e9)
+
+			ch <- 0
+		}
 	}()
 
-	wg.Add(1)
+	defer this.getLastError()
 
-	this.println("start delay worker!")
+	wg.Add(1)
 
 	for {
 		if this.stop {
