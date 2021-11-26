@@ -157,6 +157,10 @@ func (this RedisQueueClient) RescuePendingQueue(queue_name string) (total int, e
 
 	for k, _ := range this.config {
 		redis, _, err := this.getRedis(k)
+		if nil != err {
+			return total, err
+		}
+
 		sha, err := this.getPendingSha(queue_name, redis)
 		if nil != err {
 			return total, err
@@ -184,6 +188,10 @@ func (this RedisQueueClient) RescueDelayQueue(queue_name string) (total int, err
 
 	for k, _ := range this.config {
 		redis, _, err := this.getRedis(k)
+		if nil != err {
+			return total, err
+		}
+
 		sha, err := this.getDelaySha(queue_name, redis)
 		if nil != err {
 			return total, err

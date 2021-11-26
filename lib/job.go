@@ -311,6 +311,9 @@ func (this *Job) execTask(worker *Worker, consumer_id int) { //{{{
 	params, traceid, receipt_handle, err := this.queue.ReceiveMessage(this.JobName, consumer_id, worker.Options)
 	if nil != err {
 		this.logRunError("ReceiveMessage error:", err)
+		//异常退出，3秒后重试
+		time.Sleep(3e9)
+
 		return
 	}
 
